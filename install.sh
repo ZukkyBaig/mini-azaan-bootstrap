@@ -35,7 +35,7 @@ CONFIGURED_HOSTNAME=""
 install_packages() {
   echo "Installing OS packages..."
   apt-get update
-  apt-get install -y git openssh-client openssh-server python3 python3-venv python3-pip mpg123 alsa-utils
+  apt-get install -y git openssh-client openssh-server python3 python3-venv python3-pip mpg123 alsa-utils avahi-daemon
 }
 
 ensure_ssh_key() {
@@ -53,7 +53,6 @@ ensure_ssh_key() {
   chown "${RUN_USER}:${RUN_USER}" "${SSH_DIR}/known_hosts" 2>/dev/null || true
   chmod 644 "${SSH_DIR}/known_hosts" 2>/dev/null || true
 
-  # Ensure ssh always uses this key for github.com
   sudo -u "${RUN_USER}" bash -c "cat > '${SSH_DIR}/config' <<EOF
 Host github.com
   HostName github.com
@@ -195,6 +194,54 @@ start_service() {
   systemctl restart "${SERVICE_NAME}"
 }
 
+print_device_info() {
+  local ip
+  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+
+  echo
+  echo "========================================"
+  echo " Install complete"
+  echo
+  echo " Hostname: ${CONFIGURED_HOSTNAME:-$(hostname)}"
+  if [[ -n "${ip}" ]]; then
+    echo " IP Address: ${ip}"
+  else
+    echo " IP Address: (unknown)"
+  fi
+  echo
+  echo " SSH:"
+  echo "   ssh ${RUN_USER}@${CONFIGURED_HOSTNAME}.local"
+  if [[ -n "${ip}" ]]; then
+    echo "   ssh ${RUN_USER}@${ip}"
+  fi
+  echo
+  echo " Service:"
+  echo "   systemctl status ${SERVICE_NAME}"
+  echo " Logs:"
+  echo "   journalctl -u ${SERVICE_NAME} -f"
+  echo "========================================"
+  echo
+}
+
+health_check_service() {
+  echo "Checking service status..."
+  if systemctl is-active --quiet "${SERVICE_NAME}"; then
+    echo "Service is running."
+  else
+    echo "Service is not running. Showing status:"
+    systemctl status "${SERVICE_NAME}" --no-pager || true
+    echo
+    echo "Showing last 60 log lines:"
+    journalctl -u "${SERVICE_NAME}" -n 60 --no-pager || true
+  fi
+}
+
+refresh_mdns() {
+  echo "Refreshing mDNS announcement (avahi)..."
+  systemctl enable avahi-daemon >/dev/null 2>&1 || true
+  systemctl restart avahi-daemon >/dev/null 2>&1 || true
+}
+
 main() {
   install_packages
   ensure_ssh_key
@@ -212,11 +259,11 @@ main() {
   install_cli_link
   start_service
 
-  echo
-  echo "Mini Azaan installed successfully."
-  echo "Hostname set to: ${CONFIGURED_HOSTNAME:-mini-azaan}"
-  echo
-  echo "A reboot is required to apply the new hostname."
+  refresh_mdns
+  health_check_service
+  print_device_info
+
+  echo "A reboot is recommended to apply the new hostname everywhere."
   echo "You can reboot later manually with: sudo reboot"
   echo
 
