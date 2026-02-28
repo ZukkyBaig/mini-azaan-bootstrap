@@ -30,6 +30,7 @@ fi
 SSH_DIR="${RUN_HOME}/.ssh"
 KEY_PATH="${SSH_DIR}/id_ed25519"
 PUB_PATH="${KEY_PATH}.pub"
+CONFIGURED_HOSTNAME=""
 
 install_packages() {
   echo "Installing OS packages..."
@@ -51,6 +52,17 @@ ensure_ssh_key() {
   sudo -u "${RUN_USER}" bash -c "ssh-keyscan -H github.com >> '${SSH_DIR}/known_hosts' 2>/dev/null || true" || true
   chown "${RUN_USER}:${RUN_USER}" "${SSH_DIR}/known_hosts" 2>/dev/null || true
   chmod 644 "${SSH_DIR}/known_hosts" 2>/dev/null || true
+
+  # Ensure ssh always uses this key for github.com
+  sudo -u "${RUN_USER}" bash -c "cat > '${SSH_DIR}/config' <<EOF
+Host github.com
+  HostName github.com
+  User git
+  IdentityFile ${KEY_PATH}
+  IdentitiesOnly yes
+EOF"
+  chown "${RUN_USER}:${RUN_USER}" "${SSH_DIR}/config"
+  chmod 600 "${SSH_DIR}/config"
 }
 
 print_deploy_key() {
@@ -70,9 +82,16 @@ wait_for_enter() {
   read -r _ < /dev/tty
 }
 
+prepare_dirs() {
+  echo "Preparing directories..."
+  mkdir -p "${APP_ROOT}"
+  mkdir -p "${ETC_DIR}"
+  chown -R "${RUN_USER}:${RUN_USER}" "${APP_ROOT}"
+}
+
 configure_hostname() {
   echo
-  echo "Hostname helps you identify devices on the network."
+  echo "Hostname helps you identify this device on the network."
   read -rp "Enter device hostname (default: mini-azaan): " NEW_HOSTNAME < /dev/tty
   NEW_HOSTNAME=${NEW_HOSTNAME:-mini-azaan}
 
@@ -88,15 +107,22 @@ configure_hostname() {
     echo "WARNING: ${USER_DATA} not found. Hostname will not be persisted via cloud-init."
   fi
 
-  echo "Hostname configured as ${NEW_HOSTNAME}"
+  CONFIGURED_HOSTNAME="${NEW_HOSTNAME}"
+
+  echo
+  echo "========================================"
+  echo " Device hostname configured as:"
+  echo "   ${CONFIGURED_HOSTNAME}"
+  echo
+  echo " After reboot you can SSH using:"
+  echo "   ssh ${RUN_USER}@${CONFIGURED_HOSTNAME}.local"
+  echo "========================================"
+  echo
 }
 
 clone_repo_once() {
-  mkdir -p "${APP_ROOT}"
-  mkdir -p "${ETC_DIR}"
   rm -rf "${APP_DIR}"
-
-  sudo -u "${RUN_USER}" git clone "${REPO_URL}" "${APP_DIR}" >/dev/null 2>&1
+  sudo -u "${RUN_USER}" git clone "${REPO_URL}" "${APP_DIR}"
 }
 
 clone_repo_with_retry() {
@@ -104,13 +130,14 @@ clone_repo_with_retry() {
 
   while true; do
     if clone_repo_once; then
-      sudo -u "${RUN_USER}" git -C "${APP_DIR}" checkout "${GIT_REF}" >/dev/null 2>&1 || true
+      sudo -u "${RUN_USER}" git -C "${APP_DIR}" checkout "${GIT_REF}" || true
       echo "Clone succeeded."
       break
     fi
 
     echo
-    echo "Clone failed. This usually means the deploy key has not been added yet."
+    echo "Clone failed."
+    echo "If SSH auth is fine, this is usually permissions or deploy key not added."
     print_deploy_key
     wait_for_enter
     echo "Retrying clone..."
@@ -171,6 +198,7 @@ start_service() {
 main() {
   install_packages
   ensure_ssh_key
+  prepare_dirs
 
   print_deploy_key
   wait_for_enter
@@ -186,9 +214,19 @@ main() {
 
   echo
   echo "Mini Azaan installed successfully."
-  echo "Rebooting to apply hostname..."
-  sleep 3
-  reboot
+  echo "Hostname set to: ${CONFIGURED_HOSTNAME:-mini-azaan}"
+  echo
+  echo "A reboot is required to apply the new hostname."
+  echo "You can reboot later manually with: sudo reboot"
+  echo
+
+  read -rp "Reboot now? (y/N): " CONFIRM < /dev/tty
+  if [[ "${CONFIRM,,}" == "y" ]]; then
+    echo "Rebooting..."
+    reboot
+  else
+    echo "Skipping reboot. Remember to reboot manually."
+  fi
 }
 
 main
