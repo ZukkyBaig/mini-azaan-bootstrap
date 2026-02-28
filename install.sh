@@ -22,7 +22,6 @@ echo
 
 RUN_USER="${SUDO_USER:-pi}"
 RUN_HOME="$(getent passwd "${RUN_USER}" | cut -d: -f6)"
-
 if [[ -z "${RUN_HOME}" ]]; then
   echo "Could not resolve home directory for user: ${RUN_USER}"
   exit 1
@@ -49,24 +48,32 @@ ensure_ssh_key() {
     sudo -u "${RUN_USER}" ssh-keygen -t ed25519 -N "" -f "${KEY_PATH}" -C "mini-azaan-${RUN_USER}@$(hostname)"
   fi
 
-  sudo -u "${RUN_USER}" bash -c "ssh-keyscan -H github.com >> '${SSH_DIR}/known_hosts' 2>/dev/null || true"
+  sudo -u "${RUN_USER}" bash -c "ssh-keyscan -H github.com >> '${SSH_DIR}/known_hosts' 2>/dev/null || true" || true
+  chown "${RUN_USER}:${RUN_USER}" "${SSH_DIR}/known_hosts" 2>/dev/null || true
+  chmod 644 "${SSH_DIR}/known_hosts" 2>/dev/null || true
 }
 
-prompt_deploy_key() {
+print_deploy_key() {
   echo
   echo "Add this public key to GitHub:"
   echo "Repo -> Settings -> Deploy keys -> Add deploy key"
+  echo "Tip: read-only is fine"
   echo
   echo "----------------------------------------"
   cat "${PUB_PATH}"
   echo "----------------------------------------"
   echo
-  read -rp "After adding it, press Enter to continue..."
+}
+
+wait_for_enter() {
+  echo "Press Enter once you've added the deploy key..."
+  read -r _ < /dev/tty
 }
 
 configure_hostname() {
   echo
-  read -rp "Enter device hostname (default: mini-azaan): " NEW_HOSTNAME
+  echo "Hostname helps you identify devices on the network."
+  read -rp "Enter device hostname (default: mini-azaan): " NEW_HOSTNAME < /dev/tty
   NEW_HOSTNAME=${NEW_HOSTNAME:-mini-azaan}
 
   USER_DATA="/boot/firmware/user-data"
@@ -77,26 +84,37 @@ configure_hostname() {
     else
       printf "\nhostname: %s\n" "${NEW_HOSTNAME}" >> "${USER_DATA}"
     fi
+  else
+    echo "WARNING: ${USER_DATA} not found. Hostname will not be persisted via cloud-init."
   fi
 
   echo "Hostname configured as ${NEW_HOSTNAME}"
 }
 
-clone_repo() {
-  echo "Cloning private repo..."
+clone_repo_once() {
   mkdir -p "${APP_ROOT}"
   mkdir -p "${ETC_DIR}"
-
   rm -rf "${APP_DIR}"
 
-  if ! sudo -u "${RUN_USER}" git clone "${REPO_URL}" "${APP_DIR}"; then
-    echo
-    echo "Clone failed. Ensure deploy key was added correctly."
-    cat "${PUB_PATH}"
-    exit 1
-  fi
+  sudo -u "${RUN_USER}" git clone "${REPO_URL}" "${APP_DIR}" >/dev/null 2>&1
+}
 
-  sudo -u "${RUN_USER}" git -C "${APP_DIR}" checkout "${GIT_REF}"
+clone_repo_with_retry() {
+  echo "Cloning private repo..."
+
+  while true; do
+    if clone_repo_once; then
+      sudo -u "${RUN_USER}" git -C "${APP_DIR}" checkout "${GIT_REF}" >/dev/null 2>&1 || true
+      echo "Clone succeeded."
+      break
+    fi
+
+    echo
+    echo "Clone failed. This usually means the deploy key has not been added yet."
+    print_deploy_key
+    wait_for_enter
+    echo "Retrying clone..."
+  done
 }
 
 setup_venv() {
@@ -114,6 +132,8 @@ seed_config_if_missing() {
 }
 
 install_systemd_service() {
+  echo "Installing systemd service..."
+
   cat > "/etc/systemd/system/${SERVICE_NAME}" <<EOF
 [Unit]
 Description=Mini Azaan Service
@@ -138,20 +158,26 @@ EOF
 }
 
 install_cli_link() {
+  echo "Installing CLI shortcut..."
   chmod +x "${APP_DIR}/manage.sh" || true
   ln -sf "${APP_DIR}/manage.sh" "${BIN_LINK}"
 }
 
 start_service() {
+  echo "Starting service..."
   systemctl restart "${SERVICE_NAME}"
 }
 
 main() {
   install_packages
   ensure_ssh_key
-  prompt_deploy_key
+
+  print_deploy_key
+  wait_for_enter
+
+  clone_repo_with_retry
   configure_hostname
-  clone_repo
+
   setup_venv
   seed_config_if_missing
   install_systemd_service
