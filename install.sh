@@ -152,17 +152,70 @@ seed_config_if_missing() {
   fi
 }
 
+install_audio_autoconfig() {
+  echo "Installing USB audio auto-config helper..."
+
+  cat > /usr/local/bin/mini-azaan-audio-autoconfig <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+OUT="/etc/asound.conf"
+
+CARD_ID="$(awk '
+  $0 ~ /: USB-Audio/ {
+    for (i=1; i<=NF; i++) {
+      if ($i ~ /^\[/) {
+        gsub(/^\[/,"",$i)
+        gsub(/\]:$/,"",$i)
+        gsub(/\]$/,"",$i)
+        print $i
+        exit
+      }
+    }
+  }
+' /proc/asound/cards 2>/dev/null || true)"
+
+if [[ -z "${CARD_ID}" ]]; then
+  echo "No USB-Audio card detected. Leaving ${OUT} unchanged."
+  exit 0
+fi
+
+cat > "${OUT}" <<EOF_CONF
+pcm.!default {
+  type hw
+  card ${CARD_ID}
+  device 0
+}
+
+ctl.!default {
+  type hw
+  card ${CARD_ID}
+}
+EOF_CONF
+
+chmod 644 "${OUT}"
+echo "Configured ALSA default to USB card: ${CARD_ID}"
+EOF
+
+  chmod 755 /usr/local/bin/mini-azaan-audio-autoconfig
+}
+
 install_systemd_service() {
   cat > "/etc/systemd/system/${SERVICE_NAME}" <<EOF
 [Unit]
 Description=Mini Azaan Service
-After=network-online.target
+After=network-online.target sound.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=${RUN_USER}
 WorkingDirectory=${APP_DIR}
+
+ExecStartPre=/bin/sleep 2
+ExecStartPre=/usr/local/bin/mini-azaan-audio-autoconfig
+ExecStartPre=/bin/bash -c 'for i in {1..30}; do grep -qi "USB-Audio" /proc/asound/cards && exit 0; sleep 1; done; echo "USB-Audio not detected yet, starting anyway"; exit 0'
+
 ExecStart=${APP_DIR}/.venv/bin/python ${APP_DIR}/main.py
 Restart=always
 RestartSec=5
@@ -211,6 +264,8 @@ main() {
 
   setup_venv
   seed_config_if_missing
+
+  install_audio_autoconfig
   install_systemd_service
   install_cli_link
   start_service
