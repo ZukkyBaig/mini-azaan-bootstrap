@@ -8,7 +8,6 @@ ETC_DIR="/etc/mini-azaan"
 ETC_CONFIG="${ETC_DIR}/config.yml"
 BIN_LINK="/usr/local/bin/mini-azaan"
 
-# Hardcoded private repo
 REPO_URL="git@github.com:zukkybaig/mini-azaan.git"
 GIT_REF="main"
 
@@ -35,7 +34,15 @@ CONFIGURED_HOSTNAME=""
 install_packages() {
   echo "Installing OS packages..."
   apt-get update
-  apt-get install -y git openssh-client openssh-server python3 python3-venv python3-pip mpg123 alsa-utils avahi-daemon
+  apt-get install -y \
+    git \
+    openssh-client \
+    openssh-server \
+    python3 \
+    python3-venv \
+    python3-pip \
+    libsdl2-mixer-2.0-0 \
+    avahi-daemon
 }
 
 ensure_ssh_key() {
@@ -68,7 +75,6 @@ print_deploy_key() {
   echo
   echo "Add this public key to GitHub:"
   echo "Repo -> Settings -> Deploy keys -> Add deploy key"
-  echo "Tip: read-only is fine"
   echo
   echo "----------------------------------------"
   cat "${PUB_PATH}"
@@ -90,7 +96,6 @@ prepare_dirs() {
 
 configure_hostname() {
   echo
-  echo "Hostname helps you identify this device on the network."
   read -rp "Enter device hostname (default: mini-azaan): " NEW_HOSTNAME < /dev/tty
   NEW_HOSTNAME=${NEW_HOSTNAME:-mini-azaan}
 
@@ -102,20 +107,12 @@ configure_hostname() {
     else
       printf "\nhostname: %s\n" "${NEW_HOSTNAME}" >> "${USER_DATA}"
     fi
-  else
-    echo "WARNING: ${USER_DATA} not found. Hostname will not be persisted via cloud-init."
   fi
 
   CONFIGURED_HOSTNAME="${NEW_HOSTNAME}"
 
   echo
-  echo "========================================"
-  echo " Device hostname configured as:"
-  echo "   ${CONFIGURED_HOSTNAME}"
-  echo
-  echo " After reboot you can SSH using:"
-  echo "   ssh ${RUN_USER}@${CONFIGURED_HOSTNAME}.local"
-  echo "========================================"
+  echo "Device hostname configured as: ${CONFIGURED_HOSTNAME}"
   echo
 }
 
@@ -134,12 +131,9 @@ clone_repo_with_retry() {
       break
     fi
 
-    echo
-    echo "Clone failed."
-    echo "If SSH auth is fine, this is usually permissions or deploy key not added."
+    echo "Clone failed. Ensure deploy key is added."
     print_deploy_key
     wait_for_enter
-    echo "Retrying clone..."
   done
 }
 
@@ -158,8 +152,6 @@ seed_config_if_missing() {
 }
 
 install_systemd_service() {
-  echo "Installing systemd service..."
-
   cat > "/etc/systemd/system/${SERVICE_NAME}" <<EOF
 [Unit]
 Description=Mini Azaan Service
@@ -184,60 +176,15 @@ EOF
 }
 
 install_cli_link() {
-  echo "Installing CLI shortcut..."
   chmod +x "${APP_DIR}/manage.sh" || true
   ln -sf "${APP_DIR}/manage.sh" "${BIN_LINK}"
 }
 
 start_service() {
-  echo "Starting service..."
   systemctl restart "${SERVICE_NAME}"
 }
 
-print_device_info() {
-  local ip
-  ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-
-  echo
-  echo "========================================"
-  echo " Install complete"
-  echo
-  echo " Hostname: ${CONFIGURED_HOSTNAME:-$(hostname)}"
-  if [[ -n "${ip}" ]]; then
-    echo " IP Address: ${ip}"
-  else
-    echo " IP Address: (unknown)"
-  fi
-  echo
-  echo " SSH:"
-  echo "   ssh ${RUN_USER}@${CONFIGURED_HOSTNAME}.local"
-  if [[ -n "${ip}" ]]; then
-    echo "   ssh ${RUN_USER}@${ip}"
-  fi
-  echo
-  echo " Service:"
-  echo "   systemctl status ${SERVICE_NAME}"
-  echo " Logs:"
-  echo "   journalctl -u ${SERVICE_NAME} -f"
-  echo "========================================"
-  echo
-}
-
-health_check_service() {
-  echo "Checking service status..."
-  if systemctl is-active --quiet "${SERVICE_NAME}"; then
-    echo "Service is running."
-  else
-    echo "Service is not running. Showing status:"
-    systemctl status "${SERVICE_NAME}" --no-pager || true
-    echo
-    echo "Showing last 60 log lines:"
-    journalctl -u "${SERVICE_NAME}" -n 60 --no-pager || true
-  fi
-}
-
 refresh_mdns() {
-  echo "Refreshing mDNS announcement (avahi)..."
   systemctl enable avahi-daemon >/dev/null 2>&1 || true
   systemctl restart avahi-daemon >/dev/null 2>&1 || true
 }
@@ -260,19 +207,17 @@ main() {
   start_service
 
   refresh_mdns
-  health_check_service
-  print_device_info
 
-  echo "A reboot is recommended to apply the new hostname everywhere."
-  echo "You can reboot later manually with: sudo reboot"
   echo
+  echo "Installation complete."
+  echo "You can SSH after reboot using:"
+  echo "  ssh ${RUN_USER}@${CONFIGURED_HOSTNAME}.local"
+  echo
+  echo "Reboot recommended to apply hostname."
 
   read -rp "Reboot now? (y/N): " CONFIRM < /dev/tty
   if [[ "${CONFIRM,,}" == "y" ]]; then
-    echo "Rebooting..."
     reboot
-  else
-    echo "Skipping reboot. Remember to reboot manually."
   fi
 }
 
