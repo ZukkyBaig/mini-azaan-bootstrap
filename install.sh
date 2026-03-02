@@ -56,7 +56,7 @@ ensure_ssh_key() {
     sudo -u "${RUN_USER}" ssh-keygen -t ed25519 -N "" -f "${KEY_PATH}" -C "mini-azaan-${RUN_USER}@$(hostname)"
   fi
 
-  sudo -u "${RUN_USER}" bash -c "ssh-keyscan -H github.com >> '${SSH_DIR}/known_hosts' 2>/dev/null || true" || true
+  sudo -u "${RUN_USER}" bash -c "ssh-keyscan -H github.com >> '${SSH_DIR}/known_hosts' 2>/dev/null || true"
   chown "${RUN_USER}:${RUN_USER}" "${SSH_DIR}/known_hosts" 2>/dev/null || true
   chmod 644 "${SSH_DIR}/known_hosts" 2>/dev/null || true
 
@@ -141,6 +141,7 @@ setup_venv() {
   echo "Setting up virtual environment..."
   cd "${APP_DIR}"
   sudo -u "${RUN_USER}" python3 -m venv .venv
+  sudo -u "${RUN_USER}" .venv/bin/pip install --upgrade pip
   sudo -u "${RUN_USER}" .venv/bin/pip install -r requirements.txt
 }
 
@@ -176,8 +177,16 @@ EOF
 }
 
 install_cli_link() {
-  chmod +x "${APP_DIR}/manage.sh" || true
+  echo "Installing CLI..."
+
+  if [[ ! -f "${APP_DIR}/manage.sh" ]]; then
+    echo "manage.sh not found!"
+    exit 1
+  fi
+
+  chmod 755 "${APP_DIR}/manage.sh"
   ln -sf "${APP_DIR}/manage.sh" "${BIN_LINK}"
+  chmod 755 "${BIN_LINK}"
 }
 
 start_service() {
@@ -205,15 +214,17 @@ main() {
   install_systemd_service
   install_cli_link
   start_service
-
   refresh_mdns
 
   echo
   echo "Installation complete."
-  echo "You can SSH after reboot using:"
+  echo
+  echo "You can SSH using:"
   echo "  ssh ${RUN_USER}@${CONFIGURED_HOSTNAME}.local"
   echo
-  echo "Reboot recommended to apply hostname."
+  echo "Run:"
+  echo "  mini-azaan version"
+  echo
 
   read -rp "Reboot now? (y/N): " CONFIRM < /dev/tty
   if [[ "${CONFIRM,,}" == "y" ]]; then
