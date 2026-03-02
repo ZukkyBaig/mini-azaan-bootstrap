@@ -210,6 +210,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=${RUN_USER}
+PermissionsStartOnly=true
 WorkingDirectory=${APP_DIR}
 
 ExecStartPre=/bin/sleep 2
