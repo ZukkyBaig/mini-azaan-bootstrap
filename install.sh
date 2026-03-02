@@ -93,7 +93,8 @@ install_packages() {
     python3-pip \
     libsdl2-mixer-2.0-0 \
     avahi-daemon \
-    tmux
+    tmux \
+    alsa-utils
 }
 
 ensure_ssh_key() {
@@ -252,11 +253,22 @@ if [[ -z "${CARD_ID}" ]]; then
   exit 0
 fi
 
+# Use plug so ALSA can adapt sample rate / channels reliably
 cat > "${OUT}" <<EOF_CONF
-pcm.!default {
+pcm.usb_hw {
   type hw
   card ${CARD_ID}
   device 0
+}
+
+pcm.usb {
+  type plug
+  slave.pcm "usb_hw"
+}
+
+pcm.!default {
+  type plug
+  slave.pcm "usb"
 }
 
 ctl.!default {
@@ -266,10 +278,42 @@ ctl.!default {
 EOF_CONF
 
 chmod 644 "${OUT}"
-echo "Configured ALSA default to USB card: ${CARD_ID}"
+echo "Configured ALSA default to USB card (with plug): ${CARD_ID}"
 EOF
 
   chmod 755 /usr/local/bin/mini-azaan-audio-autoconfig
+}
+
+set_pcm_full_volume() {
+  echo "Setting USB PCM mixer to 100% (hardware baseline)..."
+
+  if ! command -v amixer >/dev/null 2>&1; then
+    echo "amixer not found, skipping PCM volume set."
+    return 0
+  fi
+
+  # If there are multiple USB devices, this uses the first USB-Audio card it finds.
+  local card_index=""
+  card_index="$(awk '
+    $0 ~ /: USB-Audio/ {
+      gsub(/^[[:space:]]*/,"",$1)
+      print $1
+      exit
+    }
+  ' /proc/asound/cards 2>/dev/null | tr -d ' ' || true)"
+
+  if [[ -z "${card_index}" ]]; then
+    echo "No USB-Audio detected yet, skipping PCM volume set."
+    return 0
+  fi
+
+  # Only set if PCM control exists, to avoid errors on devices without it.
+  if amixer -c "${card_index}" scontrols 2>/dev/null | grep -qi "^Simple mixer control 'PCM'"; then
+    amixer -c "${card_index}" -q sset PCM 100% || true
+    echo "Set card ${card_index} PCM to 100%."
+  else
+    echo "Card ${card_index} has no PCM mixer control, skipping."
+  fi
 }
 
 install_systemd_service() {
@@ -373,6 +417,10 @@ main() {
   seed_config_if_missing
 
   install_audio_autoconfig
+  # Configure ALSA then set hardware PCM high so app volume works as expected
+  /usr/local/bin/mini-azaan-audio-autoconfig || true
+  set_pcm_full_volume
+
   install_systemd_service
   install_cli_link
   start_service
