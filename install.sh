@@ -151,31 +151,23 @@ configure_hostname() {
   read -rp "Enter device hostname (default: mini-azaan): " NEW_HOSTNAME < /dev/tty
   NEW_HOSTNAME=${NEW_HOSTNAME:-mini-azaan}
 
-  USER_DATA="/boot/firmware/user-data"
+  # Set hostname immediately on running system
+  hostnamectl set-hostname "${NEW_HOSTNAME}"
 
-  if [[ -f "${USER_DATA}" ]]; then
-    if ! grep -q "^#cloud-config" "${USER_DATA}"; then
-      echo "WARNING: ${USER_DATA} missing #cloud-config header, adding it now..."
-      sed -i '1s/^/#cloud-config\n/' "${USER_DATA}"
-    fi
-
-    if grep -qE '^[[:space:]]*hostname:' "${USER_DATA}"; then
-      sed -i -E "s/^[[:space:]]*hostname:.*/hostname: ${NEW_HOSTNAME}/" "${USER_DATA}"
-    else
-      printf "\nhostname: %s\n" "${NEW_HOSTNAME}" >> "${USER_DATA}"
-    fi
+  # Fix /etc/hosts
+  if grep -q "127.0.1.1" /etc/hosts; then
+    sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t${NEW_HOSTNAME}/" /etc/hosts
   else
-    echo "WARNING: ${USER_DATA} not found, skipping cloud-init hostname update."
+    printf "127.0.1.1\t%s\n" "${NEW_HOSTNAME}" >> /etc/hosts
   fi
 
-  # Reset cloud-init run state so it re-applies on next boot
-  cloud-init clean
+  # Disable cloud-init so it never stomps our config on reboot
+  touch /etc/cloud/cloud-init.disabled
 
   CONFIGURED_HOSTNAME="${NEW_HOSTNAME}"
 
   echo
   echo "Device hostname configured as: ${CONFIGURED_HOSTNAME}"
-  echo "Hostname will apply fully on reboot."
   echo
 }
 
