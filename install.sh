@@ -422,6 +422,14 @@ install_cli_link() {
   chmod 755 "${BIN_LINK}"
 }
 
+configure_sudoers() {
+  echo "Configuring passwordless sudo for service management..."
+  cat > /etc/sudoers.d/mini-azaan <<EOF
+${RUN_USER} ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart mini-azaan.service, /usr/bin/systemctl status mini-azaan.service, /usr/local/bin/mini-azaan
+EOF
+  chmod 440 /etc/sudoers.d/mini-azaan
+}
+
 start_service() {
   echo "Starting service..."
   systemctl restart "${SERVICE_NAME}"
@@ -494,6 +502,7 @@ main() {
   install_web_service
   allow_low_port
   install_cli_link
+  configure_sudoers
   start_service
   start_web_service
   refresh_mdns
