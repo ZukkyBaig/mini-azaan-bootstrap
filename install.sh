@@ -226,6 +226,9 @@ seed_config_if_missing() {
   else
     echo "Config exists at ${ETC_CONFIG}, leaving it unchanged."
   fi
+  
+  # Ensure the app user owns the config directory and all contents
+  chown -R "${RUN_USER}:${RUN_USER}" "${ETC_DIR}"
 }
 
 install_tailscale() {
