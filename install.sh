@@ -358,7 +358,7 @@ ExecStartPre=/bin/bash -c 'for i in {1..30}; do grep -qi "USB-Audio" /proc/asoun
 ExecStartPre=/usr/local/bin/mini-azaan-audio-autoconfig
 ExecStartPre=/bin/bash -c 'amixer -c 0 sset PCM 100% || true'
 
-ExecStart=${APP_DIR}/.venv/bin/python ${APP_DIR}/main.py
+ExecStart=${APP_DIR}/.venv/bin/python ${APP_DIR}/run_scheduler.py
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
@@ -369,6 +369,44 @@ EOF
 
   systemctl daemon-reload
   systemctl enable "${SERVICE_NAME}"
+}
+
+install_web_service() {
+  echo "Installing systemd unit: mini-azaan-web.service"
+
+  cat > "/etc/systemd/system/mini-azaan-web.service" <<EOF
+[Unit]
+Description=Mini Azaan Web UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${RUN_USER}
+WorkingDirectory=${APP_DIR}
+ExecStart=${APP_DIR}/.venv/bin/uvicorn web.app:app --host 0.0.0.0 --port 80
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable mini-azaan-web.service
+}
+
+allow_low_port() {
+  echo "Granting Python permission to bind port 80..."
+  local real_python
+  real_python="$(readlink -f "${APP_DIR}/.venv/bin/python3")"
+  setcap 'cap_net_bind_service=+ep' "${real_python}"
+}
+
+start_web_service() {
+  echo "Starting web service..."
+  systemctl restart mini-azaan-web.service
 }
 
 install_cli_link() {
@@ -405,7 +443,9 @@ print_summary() {
   echo
   local ts_ip
   ts_ip="$(tailscale ip -4 2>/dev/null || true)"
-
+  
+  echo " Web UI:"
+  echo "   http://${CONFIGURED_HOSTNAME:-$(hostname)}.local"
   echo " Hostname: ${CONFIGURED_HOSTNAME:-$(hostname)}"
   if [[ -n "${ip}" ]]; then
     echo " IP: ${ip}"
@@ -451,8 +491,11 @@ main() {
   set_pcm_full_volume
 
   install_systemd_service
+  install_web_service
+  allow_low_port
   install_cli_link
   start_service
+  start_web_service
   refresh_mdns
 
   print_summary
