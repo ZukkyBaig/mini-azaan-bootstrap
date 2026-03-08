@@ -251,6 +251,8 @@ install_system_files() {
   # Configure ALSA then set hardware PCM high so app volume works as expected
   /usr/local/bin/mini-azaan-setup-alsa || true
   set_pcm_full_volume
+  # Pre-create the AP profile so it's ready without NetworkManager needing to scan
+  /usr/local/bin/mini-azaan-ap-mode create || true
 }
 
 set_pcm_full_volume() {
