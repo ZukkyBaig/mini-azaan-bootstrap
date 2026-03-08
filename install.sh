@@ -249,7 +249,7 @@ install_tailscale() {
 install_system_files() {
   RUN_USER="${RUN_USER}" "${APP_DIR}/deploy/system-update.sh"
   # Configure ALSA then set hardware PCM high so app volume works as expected
-  /usr/local/bin/mini-azaan-audio-autoconfig || true
+  /usr/local/bin/mini-azaan-setup-alsa || true
   set_pcm_full_volume
 }
 
