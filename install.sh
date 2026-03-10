@@ -94,7 +94,8 @@ install_packages() {
     libsdl2-mixer-2.0-0 \
     avahi-daemon \
     tmux \
-    alsa-utils
+    alsa-utils \
+    dnsmasq-base
 }
 
 ensure_ssh_key() {
