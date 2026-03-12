@@ -8,13 +8,30 @@ ETC_DIR="/etc/mini-adhan"
 ETC_CONFIG="${ETC_DIR}/config.yml"
 BIN_LINK="/usr/local/bin/adhan"
 
-REPO_URL="git@github.com:zukkybaig/mini-adhan.git"
 GIT_REF="main"
 VERSION_MODE=""
 VERSION_TAG=""
 
+GH_APP_ID="3076077"
+GH_INSTALL_ID="115896741"
+R2_ENDPOINT="https://a9ae43b7dc4de560ad084c65215e5250.r2.cloudflarestorage.com"
+R2_BUCKET="mini-adhan-keys"
+R2_KEY_ID="6a0af8f8642b95aa7176b403cfb2da01"
+R2_SECRET_KEY="c355a5e341378ee41af2eea39b7dd8a33dd9d39c955d53daa2037516a8e86276"
+R2_PEM_OBJECT="gh-app.pem"
+
+PEM_FILE=""
+GH_TOKEN=""
+
 LOG_DIR="/var/log/mini-adhan"
 LOG_FILE="${LOG_DIR}/install.log"
+
+# Parse arguments
+for arg in "$@"; do
+  case "${arg}" in
+    --pem=*) PEM_FILE="${arg#*=}" ;;
+  esac
+done
 
 if [[ "${EUID}" -ne 0 ]]; then
   echo "Please run as root."
@@ -78,9 +95,6 @@ if [[ -z "${RUN_HOME}" ]]; then
   exit 1
 fi
 
-SSH_DIR="${RUN_HOME}/.ssh"
-KEY_PATH="${SSH_DIR}/id_ed25519"
-PUB_PATH="${KEY_PATH}.pub"
 CONFIGURED_HOSTNAME=""
 
 install_packages() {
@@ -88,8 +102,6 @@ install_packages() {
   apt-get update
   apt-get install -y \
     git \
-    openssh-client \
-    openssh-server \
     python3 \
     python3-venv \
     python3-pip \
@@ -98,48 +110,6 @@ install_packages() {
     tmux \
     alsa-utils \
     dnsmasq-base
-}
-
-ensure_ssh_key() {
-  echo "Ensuring SSH deploy key exists..."
-
-  mkdir -p "${SSH_DIR}"
-  chown "${RUN_USER}:${RUN_USER}" "${SSH_DIR}"
-  chmod 700 "${SSH_DIR}"
-
-  if [[ ! -f "${KEY_PATH}" ]]; then
-    sudo -u "${RUN_USER}" ssh-keygen -t ed25519 -N "" -f "${KEY_PATH}" -C "mini-adhan-${RUN_USER}@$(hostname)"
-  fi
-
-  sudo -u "${RUN_USER}" bash -c "ssh-keyscan -H github.com >> '${SSH_DIR}/known_hosts' 2>/dev/null || true"
-  chown "${RUN_USER}:${RUN_USER}" "${SSH_DIR}/known_hosts" 2>/dev/null || true
-  chmod 644 "${SSH_DIR}/known_hosts" 2>/dev/null || true
-
-  sudo -u "${RUN_USER}" bash -c "cat > '${SSH_DIR}/config' <<EOF
-Host github.com
-  HostName github.com
-  User git
-  IdentityFile ${KEY_PATH}
-  IdentitiesOnly yes
-EOF"
-  chown "${RUN_USER}:${RUN_USER}" "${SSH_DIR}/config"
-  chmod 600 "${SSH_DIR}/config"
-}
-
-print_deploy_key() {
-  echo
-  echo "Add this public key to GitHub:"
-  echo "Repo -> Settings -> Deploy keys -> Add deploy key"
-  echo
-  echo "----------------------------------------"
-  cat "${PUB_PATH}"
-  echo "----------------------------------------"
-  echo
-}
-
-wait_for_enter() {
-  echo "Press Enter once you've added the deploy key..."
-  read -r _ < /dev/tty
 }
 
 prepare_dirs() {
@@ -212,6 +182,194 @@ select_version() {
   echo
 }
 
+download_pem_from_r2() {
+  local dest="${1:-/tmp/gh-app.pem}"
+  echo "Downloading PEM key from Cloudflare R2..."
+  R2_KEY_ID="${R2_KEY_ID}" \
+  R2_SECRET_KEY="${R2_SECRET_KEY}" \
+  R2_ENDPOINT="${R2_ENDPOINT}" \
+  R2_BUCKET="${R2_BUCKET}" \
+  R2_PEM_OBJECT="${R2_PEM_OBJECT}" \
+  DEST="${dest}" \
+  python3 -c "
+import hashlib, hmac, datetime, urllib.request, sys, os
+
+key_id = os.environ['R2_KEY_ID']
+secret = os.environ['R2_SECRET_KEY']
+endpoint = os.environ['R2_ENDPOINT']
+bucket = os.environ['R2_BUCKET']
+obj = os.environ['R2_PEM_OBJECT']
+dest = os.environ['DEST']
+
+now = datetime.datetime.now(datetime.UTC)
+datestamp = now.strftime('%Y%m%d')
+amzdate = now.strftime('%Y%m%dT%H%M%SZ')
+region = 'auto'
+service = 's3'
+
+def sign(key, msg):
+    return hmac.new(key, msg.encode('utf-8'), hashlib.sha256).digest()
+
+signing_key = sign(sign(sign(sign(('AWS4' + secret).encode('utf-8'), datestamp), region), service), 'aws4_request')
+
+host = endpoint.replace('https://','')
+uri = '/' + bucket + '/' + obj
+headers_to_sign = 'host:' + host + '\nx-amz-content-sha256:UNSIGNED-PAYLOAD\nx-amz-date:' + amzdate + '\n'
+signed_headers = 'host;x-amz-content-sha256;x-amz-date'
+canonical = 'GET\n' + uri + '\n\n' + headers_to_sign + '\n' + signed_headers + '\nUNSIGNED-PAYLOAD'
+
+scope = datestamp + '/' + region + '/' + service + '/aws4_request'
+to_sign = 'AWS4-HMAC-SHA256\n' + amzdate + '\n' + scope + '\n' + hashlib.sha256(canonical.encode()).hexdigest()
+signature = hmac.new(signing_key, to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
+
+auth = 'AWS4-HMAC-SHA256 Credential=' + key_id + '/' + scope + ', SignedHeaders=' + signed_headers + ', Signature=' + signature
+
+req = urllib.request.Request(endpoint + uri, headers={
+    'Authorization': auth,
+    'x-amz-date': amzdate,
+    'x-amz-content-sha256': 'UNSIGNED-PAYLOAD',
+    'Host': host
+})
+try:
+    data = urllib.request.urlopen(req).read()
+    if b'BEGIN' not in data:
+        print('ERROR: Downloaded file is not a valid PEM key', file=sys.stderr)
+        sys.exit(1)
+    with open(dest, 'wb') as f:
+        f.write(data)
+    print('PEM downloaded successfully.')
+except Exception as e:
+    print('ERROR: Failed to download PEM: ' + str(e), file=sys.stderr)
+    sys.exit(1)
+"
+  if [[ $? -ne 0 ]]; then
+    return 1
+  fi
+  PEM_FILE="${dest}"
+}
+
+resolve_pem_file() {
+  # 1. --pem argument (already set)
+  if [[ -n "${PEM_FILE}" && -f "${PEM_FILE}" ]]; then
+    echo "Using PEM from argument: ${PEM_FILE}"
+    return 0
+  fi
+
+  # 2. Existing install
+  if [[ -f "${ETC_DIR}/gh-app.pem" ]]; then
+    PEM_FILE="${ETC_DIR}/gh-app.pem"
+    echo "Using PEM from previous install: ${PEM_FILE}"
+    return 0
+  fi
+
+  # 3. Download from R2
+  if download_pem_from_r2 "/tmp/gh-app.pem"; then
+    PEM_FILE="/tmp/gh-app.pem"
+    return 0
+  fi
+
+  # 4. Manual prompt
+  echo
+  read -rp "Path to GitHub App PEM file: " PEM_FILE < /dev/tty
+  if [[ -n "${PEM_FILE}" && -f "${PEM_FILE}" ]]; then
+    return 0
+  fi
+
+  echo "ERROR: No PEM file found. Cannot authenticate with GitHub."
+  exit 1
+}
+
+get_github_token() {
+  local pem_file="${1}"
+  local app_id="${2:-${GH_APP_ID}}"
+  local install_id="${3:-${GH_INSTALL_ID}}"
+
+  local now_epoch
+  now_epoch=$(date +%s)
+  local iat=$((now_epoch - 30))
+  local exp=$((now_epoch + 540))
+
+  # JWT header and payload — use printf to avoid trailing newlines
+  local header
+  header=$(printf '{"alg":"RS256","typ":"JWT"}' | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+  local payload
+  payload=$(printf '{"iss":"%s","iat":%d,"exp":%d}' "${app_id}" "${iat}" "${exp}" | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+
+  # Sign
+  local signature
+  signature=$(printf '%s.%s' "${header}" "${payload}" | openssl dgst -sha256 -sign "${pem_file}" | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+
+  local jwt="${header}.${payload}.${signature}"
+
+  # Request installation token
+  local response
+  response=$(curl -s -X POST \
+    -H "Authorization: Bearer ${jwt}" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/app/installations/${install_id}/access_tokens")
+
+  GH_TOKEN=$(echo "${response}" | python3 -c "import json,sys; data=json.loads(sys.stdin.read()); print(data.get('token',''))" 2>/dev/null || true)
+
+  if [[ -z "${GH_TOKEN}" ]]; then
+    echo "ERROR: Failed to get GitHub installation token."
+    echo "Response: ${response}"
+    return 1
+  fi
+  echo "GitHub token obtained."
+}
+
+ensure_repo() {
+  echo "Ensuring app repo is present at ${APP_DIR}..."
+
+  resolve_pem_file
+  get_github_token "${PEM_FILE}" || exit 1
+
+  mkdir -p "${APP_ROOT}"
+  chown -R "${RUN_USER}:${RUN_USER}" "${APP_ROOT}"
+
+  local auth_url="https://x-access-token:${GH_TOKEN}@github.com/zukkybaig/mini-adhan.git"
+
+  if [[ -d "${APP_DIR}/.git" ]]; then
+    echo "Repo already exists, updating..."
+    sudo -u "${RUN_USER}" git -C "${APP_DIR}" remote set-url origin "${auth_url}"
+    sudo -u "${RUN_USER}" git -C "${APP_DIR}" fetch --all
+    sudo -u "${RUN_USER}" git -C "${APP_DIR}" checkout "${GIT_REF}"
+    sudo -u "${RUN_USER}" git -C "${APP_DIR}" pull
+  else
+    echo "Cloning repo..."
+    rm -rf "${APP_DIR}"
+    sudo -u "${RUN_USER}" git clone "${auth_url}" "${APP_DIR}"
+    sudo -u "${RUN_USER}" git -C "${APP_DIR}" checkout "${GIT_REF}" || true
+  fi
+
+  # Clear token from remote URL after clone (security hygiene — token expires in 1hr anyway)
+  sudo -u "${RUN_USER}" git -C "${APP_DIR}" remote set-url origin "https://github.com/zukkybaig/mini-adhan.git"
+}
+
+store_credentials() {
+  echo "Storing credentials for future updates..."
+
+  cp "${PEM_FILE}" "${ETC_DIR}/gh-app.pem"
+
+  cat > "${ETC_DIR}/gh-app.conf" << EOF
+GH_APP_ID=${GH_APP_ID}
+GH_INSTALL_ID=${GH_INSTALL_ID}
+R2_ENDPOINT=${R2_ENDPOINT}
+R2_BUCKET=${R2_BUCKET}
+R2_KEY_ID=${R2_KEY_ID}
+R2_SECRET_KEY=${R2_SECRET_KEY}
+R2_PEM_OBJECT=${R2_PEM_OBJECT}
+EOF
+
+  # Owned by RUN_USER so manage.sh can read them without sudo
+  # (consistent with how /etc/mini-adhan/ is already handled — see seed_config_if_missing)
+  chmod 600 "${ETC_DIR}/gh-app.pem"
+  chmod 600 "${ETC_DIR}/gh-app.conf"
+  chown -R "${RUN_USER}:${RUN_USER}" "${ETC_DIR}"
+
+  echo "Credentials stored at ${ETC_DIR}/"
+}
+
 checkout_version() {
   case "${VERSION_MODE}" in
     stable)
@@ -249,41 +407,6 @@ checkout_version() {
   esac
 }
 
-ensure_repo() {
-  echo "Ensuring app repo is present at ${APP_DIR}..."
-
-  mkdir -p "${APP_ROOT}"
-  chown -R "${RUN_USER}:${RUN_USER}" "${APP_ROOT}"
-
-  if [[ -d "${APP_DIR}/.git" ]]; then
-    echo "Repo already exists, updating..."
-    sudo -u "${RUN_USER}" git -C "${APP_DIR}" fetch --all
-    sudo -u "${RUN_USER}" git -C "${APP_DIR}" checkout "${GIT_REF}"
-    sudo -u "${RUN_USER}" git -C "${APP_DIR}" pull
-    return 0
-  fi
-
-  echo "Repo not found, cloning..."
-  rm -rf "${APP_DIR}"
-  sudo -u "${RUN_USER}" git clone "${REPO_URL}" "${APP_DIR}"
-  sudo -u "${RUN_USER}" git -C "${APP_DIR}" checkout "${GIT_REF}" || true
-}
-
-ensure_repo_with_retry() {
-  echo "Ensuring private repo access..."
-
-  while true; do
-    if ensure_repo; then
-      echo "Repo ready."
-      break
-    fi
-
-    echo "Repo clone/update failed. Ensure deploy key is added."
-    print_deploy_key
-    wait_for_enter
-  done
-}
-
 setup_venv() {
   echo "Setting up virtual environment..."
   cd "${APP_DIR}"
@@ -304,7 +427,7 @@ seed_config_if_missing() {
   else
     echo "Config exists at ${ETC_CONFIG}, leaving it unchanged."
   fi
-  
+
   # Ensure the app user owns the config directory and all contents
   chown -R "${RUN_USER}:${RUN_USER}" "${ETC_DIR}"
 }
@@ -402,7 +525,7 @@ print_summary() {
   echo
   local ts_ip
   ts_ip="$(tailscale ip -4 2>/dev/null || true)"
-  
+
   echo " Web UI:"
   echo "   http://${CONFIGURED_HOSTNAME:-$(hostname)}.local"
   echo " Hostname: ${CONFIGURED_HOSTNAME:-$(hostname)}"
@@ -432,15 +555,11 @@ print_summary() {
 main() {
   install_packages
   install_tailscale
-  ensure_ssh_key
   prepare_dirs
-
-  print_deploy_key
-  wait_for_enter
-
   configure_hostname
   select_version
-  ensure_repo_with_retry
+  ensure_repo
+  store_credentials
   checkout_version
 
   setup_venv
