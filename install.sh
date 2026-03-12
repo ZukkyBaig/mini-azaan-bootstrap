@@ -18,14 +18,14 @@ R2_ENDPOINT="https://a9ae43b7dc4de560ad084c65215e5250.r2.cloudflarestorage.com"
 R2_BUCKET="mini-adhan-keys"
 R2_KEY_ID="6a0af8f8642b95aa7176b403cfb2da01"
 R2_SECRET_KEY="c355a5e341378ee41af2eea39b7dd8a33dd9d39c955d53daa2037516a8e86276"
-R2_PEM_OBJECT="gh-app.pem"
-R2_TS_KEY_OBJECT="tailscale-authkey.txt"
+R2_SECRETS_OBJECT="secrets.enc"
 
 PEM_FILE=""
 TS_AUTHKEY=""
 GH_TOKEN=""
 CONFIGURED_HOSTNAME=""
 VERSION_CHOICE=""
+PROVISION_PASSWORD=""
 
 LOG_DIR="/var/log/mini-adhan"
 LOG_FILE="${LOG_DIR}/install.log"
@@ -37,6 +37,7 @@ for arg in "$@"; do
     --ts-key=*) TS_AUTHKEY="${arg#*=}" ;;
     --hostname=*) CONFIGURED_HOSTNAME="${arg#*=}" ;;
     --version=*) VERSION_CHOICE="${arg#*=}" ;;
+    --password=*) PROVISION_PASSWORD="${arg#*=}" ;;
   esac
 done
 
@@ -272,66 +273,86 @@ except Exception as e:
 "
 }
 
-download_pem_from_r2() {
-  local dest="${1:-/tmp/gh-app.pem}"
-  echo "Downloading PEM key from Cloudflare R2..."
-  if ! download_from_r2 "${R2_PEM_OBJECT}" "${dest}"; then
+download_and_decrypt_secrets() {
+  local enc_dest="/tmp/secrets.enc"
+  local tar_dest="/tmp/secrets.tar"
+  local extract_dir="/tmp/mini-adhan-secrets"
+
+  echo "Downloading encrypted secrets bundle from R2..."
+  if ! download_from_r2 "${R2_SECRETS_OBJECT}" "${enc_dest}"; then
     return 1
   fi
-  # Validate it's actually a PEM file
-  if ! grep -q "BEGIN" "${dest}" 2>/dev/null; then
-    echo "ERROR: Downloaded file is not a valid PEM key."
+
+  local attempts=0
+  while [[ ${attempts} -lt 3 ]]; do
+    if [[ -z "${PROVISION_PASSWORD}" ]]; then
+      echo
+      read -rsp "Enter provisioning password: " PROVISION_PASSWORD < /dev/tty
+      echo
+    fi
+
+    if openssl enc -aes-256-cbc -pbkdf2 -d \
+        -in "${enc_dest}" -out "${tar_dest}" \
+        -pass "pass:${PROVISION_PASSWORD}" 2>/dev/null; then
+      break
+    fi
+
+    attempts=$((attempts + 1))
+    echo "Wrong password. (${attempts}/3)"
+    PROVISION_PASSWORD=""
+    if [[ ${attempts} -ge 3 ]]; then
+      echo "ERROR: Too many failed attempts."
+      rm -f "${enc_dest}" "${tar_dest}"
+      exit 1
+    fi
+  done
+
+  rm -rf "${extract_dir}"
+  mkdir -p "${extract_dir}"
+  tar xf "${tar_dest}" -C "${extract_dir}"
+
+  # Extract PEM
+  if [[ -f "${extract_dir}/gh-app.pem" ]]; then
+    PEM_FILE="/tmp/gh-app.pem"
+    cp "${extract_dir}/gh-app.pem" "${PEM_FILE}"
+  fi
+
+  # Extract Tailscale key
+  if [[ -f "${extract_dir}/tailscale-authkey.txt" ]]; then
+    TS_AUTHKEY="$(cat "${extract_dir}/tailscale-authkey.txt" | tr -d '[:space:]')"
+  fi
+
+  # Cleanup
+  rm -f "${enc_dest}" "${tar_dest}"
+  rm -rf "${extract_dir}"
+
+  # Validate
+  if [[ -z "${PEM_FILE}" || ! -f "${PEM_FILE}" ]]; then
+    echo "ERROR: Secrets bundle did not contain gh-app.pem."
     return 1
   fi
-  echo "PEM downloaded successfully."
-  PEM_FILE="${dest}"
+  if ! grep -q "BEGIN" "${PEM_FILE}" 2>/dev/null; then
+    echo "ERROR: Extracted PEM is not valid."
+    return 1
+  fi
+
+  echo "Secrets decrypted successfully."
 }
 
-download_ts_key_from_r2() {
-  local dest="/tmp/ts-authkey.txt"
-  echo "Downloading Tailscale auth key from Cloudflare R2..."
-  if ! download_from_r2 "${R2_TS_KEY_OBJECT}" "${dest}"; then
-    return 1
-  fi
-  TS_AUTHKEY="$(cat "${dest}" | tr -d '[:space:]')"
-  rm -f "${dest}"
-  if [[ "${TS_AUTHKEY}" != tskey-* ]]; then
-    echo "WARNING: Downloaded Tailscale key does not start with tskey-. Ignoring."
-    TS_AUTHKEY=""
-    return 1
-  fi
-  echo "Tailscale auth key downloaded."
-}
-
-resolve_pem_file() {
-  # 1. --pem argument (already set)
+resolve_secrets() {
+  # PEM: --pem argument > existing install > secrets bundle
   if [[ -n "${PEM_FILE}" && -f "${PEM_FILE}" ]]; then
     echo "Using PEM from argument: ${PEM_FILE}"
-    return 0
-  fi
-
-  # 2. Existing install
-  if [[ -f "${ETC_DIR}/gh-app.pem" ]]; then
+  elif [[ -f "${ETC_DIR}/gh-app.pem" ]]; then
     PEM_FILE="${ETC_DIR}/gh-app.pem"
     echo "Using PEM from previous install: ${PEM_FILE}"
-    return 0
   fi
 
-  # 3. Download from R2
-  if download_pem_from_r2 "/tmp/gh-app.pem"; then
-    PEM_FILE="/tmp/gh-app.pem"
-    return 0
+  # TS key: --ts-key argument > existing (not stored on disk, so only from arg)
+  # If either is missing, download and decrypt the bundle
+  if [[ -z "${PEM_FILE}" || ! -f "${PEM_FILE}" ]] || [[ -z "${TS_AUTHKEY}" ]]; then
+    download_and_decrypt_secrets
   fi
-
-  # 4. Manual prompt
-  echo
-  read -rp "Path to GitHub App PEM file: " PEM_FILE < /dev/tty
-  if [[ -n "${PEM_FILE}" && -f "${PEM_FILE}" ]]; then
-    return 0
-  fi
-
-  echo "ERROR: No PEM file found. Cannot authenticate with GitHub."
-  exit 1
 }
 
 get_github_token() {
@@ -376,7 +397,6 @@ get_github_token() {
 ensure_repo() {
   echo "Ensuring app repo is present at ${APP_DIR}..."
 
-  resolve_pem_file
   get_github_token "${PEM_FILE}" || exit 1
 
   mkdir -p "${APP_ROOT}"
@@ -413,8 +433,7 @@ R2_ENDPOINT=${R2_ENDPOINT}
 R2_BUCKET=${R2_BUCKET}
 R2_KEY_ID=${R2_KEY_ID}
 R2_SECRET_KEY=${R2_SECRET_KEY}
-R2_PEM_OBJECT=${R2_PEM_OBJECT}
-R2_TS_KEY_OBJECT=${R2_TS_KEY_OBJECT}
+R2_SECRETS_OBJECT=${R2_SECRETS_OBJECT}
 EOF
 
   # Owned by RUN_USER so manage.sh can read them without sudo
@@ -492,17 +511,8 @@ install_tailscale() {
   echo "Installing Tailscale..."
   curl -fsSL https://tailscale.com/install.sh | sh
 
-  # Resolve auth key: argument > R2 > prompt
-  if [[ -z "${TS_AUTHKEY}" ]]; then
-    download_ts_key_from_r2 || true
-  fi
-  if [[ -z "${TS_AUTHKEY}" ]]; then
-    echo
-    read -rp "Enter Tailscale auth key: " TS_AUTHKEY < /dev/tty
-  fi
-
   if [[ -n "${TS_AUTHKEY}" ]]; then
-    tailscale up --authkey="${TS_AUTHKEY}" --ssh
+    tailscale up --authkey="${TS_AUTHKEY}" --hostname="${CONFIGURED_HOSTNAME}" --ssh
     echo "Tailscale connected."
   else
     echo "No auth key provided. Run 'sudo tailscale up' manually after install."
@@ -616,9 +626,10 @@ print_summary() {
 
 main() {
   install_packages
-  install_tailscale
   prepare_dirs
   configure_hostname
+  resolve_secrets
+  install_tailscale
   select_version
   ensure_repo
   store_credentials
