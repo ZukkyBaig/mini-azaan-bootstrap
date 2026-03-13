@@ -590,6 +590,14 @@ allow_low_port() {
 }
 
 start_web_service() {
+  echo "Waiting for USB speaker..."
+  for i in $(seq 1 15); do
+    if grep -qi "USB-Audio" /proc/asound/cards 2>/dev/null; then
+      echo "USB speaker detected."
+      break
+    fi
+    sleep 1
+  done
   echo "Starting web service..."
   systemctl restart mini-adhan-web.service
 }
